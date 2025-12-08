@@ -115,6 +115,9 @@ def clean_news_data(df):
     df = df[['date', 'headline', 'abstract']]
     df['text'] = df['headline'] + ' ' + df['abstract']
     df = df[['date', 'text']]
+    
+    # handle missing text by filling with empty string
+    df['text'] = df['text'].fillna("")
 
     # Load tokenizer and model
     tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
@@ -171,7 +174,7 @@ def clean_news_data(df):
     df['Date'] = pd.to_datetime(df['Date'])
     df = df[df['Date'].isin(stock_data['Date'])]
     
-    # return the cleaned and sentiment dataframe
+    #return the cleaned and sentiment dataframe
     return df
 
 # -----------------------------------------------------------------------
@@ -205,5 +208,6 @@ if __name__ == '__main__':
     news_data = load_data('../data/raw/NYT_Top_Daily_Articles.csv')
     cleaned_news_data = clean_news_data(news_data)
     print(cleaned_news_data.head())
+    print(cleaned_news_data.isna().sum())
 
 # -----------------------------------------------------------------------
