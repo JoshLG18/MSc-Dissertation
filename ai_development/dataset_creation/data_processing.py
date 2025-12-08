@@ -175,7 +175,7 @@ def clean_news_data(df):
     # df = df[df['Date'].isin(stock_data['Date'])]
     
     # #return the cleaned and sentiment dataframe
-    # return df
+    return df
 
 # -----------------------------------------------------------------------
 
