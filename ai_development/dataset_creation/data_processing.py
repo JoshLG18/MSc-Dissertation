@@ -162,20 +162,20 @@ def clean_news_data(df):
     # Add sentiment score column
     df['sentiment'] = sentiments
 
-    # combine sentiment scores by date (average sentiment per day)
-    df = df.groupby('date')['sentiment'].mean().reset_index()
-    df = df.rename(columns={'date': 'Date'})
+    # # combine sentiment scores by date (average sentiment per day)
+    # df = df.groupby('date')['sentiment'].mean().reset_index()
+    # df = df.rename(columns={'date': 'Date'})
 
-    # only keep rows that are in the ohclv data date column - load in the stock data dates
-    stock_data = load_data('../data/raw/US_OHLVC_Data.csv')
-    stock_data = stock_data.iloc[2:]
-    stock_data.columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']
-    stock_data['Date'] = pd.to_datetime(stock_data['Date'])
-    df['Date'] = pd.to_datetime(df['Date'])
-    df = df[df['Date'].isin(stock_data['Date'])]
+    # # only keep rows that are in the ohclv data date column - load in the stock data dates
+    # stock_data = load_data('../data/raw/US_OHLVC_Data.csv')
+    # stock_data = stock_data.iloc[2:]
+    # stock_data.columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']
+    # stock_data['Date'] = pd.to_datetime(stock_data['Date'])
+    # df['Date'] = pd.to_datetime(df['Date'])
+    # df = df[df['Date'].isin(stock_data['Date'])]
     
-    #return the cleaned and sentiment dataframe
-    return df
+    # #return the cleaned and sentiment dataframe
+    # return df
 
 # -----------------------------------------------------------------------
 
