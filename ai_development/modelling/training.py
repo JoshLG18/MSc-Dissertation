@@ -38,8 +38,9 @@ def validate_one_epoch(model, dataloader, criterion, device):
         out = model(xb)
         loss = criterion(out.squeeze(), yb)
         epoch_loss += loss.item() * xb.size(0)
-        preds.extend(out.squeeze().detach().cpu().numpy())
-        targets.extend(yb.detach().cpu().numpy())
+        # Ensure always at least 1D for extend
+        preds.extend(np.atleast_1d(out.squeeze().detach().cpu().numpy()))
+        targets.extend(np.atleast_1d(yb.detach().cpu().numpy()))
     return epoch_loss / len(dataloader.dataset), np.array(preds), np.array(targets)
 
 def train_full_model(
