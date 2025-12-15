@@ -124,7 +124,7 @@ def create_sequences(X, y, seq_len=1):
         ys.append(y[i+seq_len])
     return np.array(Xs), np.array(ys)
 
-SEQ_LEN = 60
+SEQ_LEN = 90
 
 def get_sequence_loader(X, y, seq_len, batch_size):
     X_seq, y_seq = create_sequences(X, y, seq_len)
@@ -182,7 +182,7 @@ def last_fold_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv,
     # Always use class-balance weighted MSE loss
     weight_pos, weight_neg = calculate_class_weights(y_train)
     # Reduce the extreme weighting by interpolating toward 1.0
-    alpha = 0.5
+    alpha = 0.75
     weight_pos = 1.0 + alpha * (weight_pos - 1.0)
     weight_neg = 1.0 + alpha * (weight_neg - 1.0)
     criterion = WeightedMSELoss(weight_pos=weight_pos, weight_neg=weight_neg)
