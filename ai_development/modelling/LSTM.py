@@ -70,45 +70,57 @@ weight_neg = 1.0 + alpha * (weight_neg - 1.0)
 print(f"  Loss weights (blended): pos={weight_pos:.3f}, neg={weight_neg:.3f}")
 
 # ------------------------------------------------------------------------
-# LSTM with Attention (simplified, correct bidirectional logic)
-class FinancialLSTM(torch.nn.Module):
-    def __init__(self, input_dim, hidden_dim=64, num_layers=1, output_dim=1, dropout=0.2, bidirectional=False):
-        super().__init__()
-        self.bidirectional = bidirectional
-        self.lstm = torch.nn.LSTM(
-            input_dim,
-            hidden_dim,
-            num_layers,
-            batch_first=True,
-            dropout=0 if num_layers == 1 else dropout,
-            bidirectional=bidirectional
-        )
-        lstm_out_dim = hidden_dim * (2 if bidirectional else 1)
-        self.layer_norm = torch.nn.LayerNorm(lstm_out_dim)
-        self.dropout = torch.nn.Dropout(dropout)
-        self.attn = torch.nn.Linear(lstm_out_dim, 1)
-        self.fc = torch.nn.Linear(lstm_out_dim, output_dim)
+# LSTM with Attention 
+import torch.nn.functional as F
 
+class FinancialLSTMWithAttention(torch.nn.Module):
+    def __init__(self, input_dim, hidden_dim=128, num_layers=2, 
+                 num_heads=4, output_dim=1, dropout=0.2):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        
+        # LSTM with stronger regularization
+        self.lstm = torch.nn.LSTM(
+            input_dim, hidden_dim, num_layers,
+            batch_first=True, dropout=dropout,
+            bidirectional=False
+        )
+        lstm_out_dim = hidden_dim  # not bidirectional
+        
+        # Multi-head attention
+        self.attention = torch.nn.MultiheadAttention(
+            lstm_out_dim, num_heads, dropout=dropout,
+            batch_first=True
+        )
+        
+        self.layer_norm1 = torch.nn.LayerNorm(lstm_out_dim)
+        self.layer_norm2 = torch.nn.LayerNorm(lstm_out_dim)
+        
+        # Feed-forward network (residual connections)
+        self.ff = torch.nn.Sequential(
+            torch.nn.Linear(lstm_out_dim, lstm_out_dim * 4),
+            torch.nn.GELU(),
+            torch.nn.Dropout(dropout),
+            torch.nn.Linear(lstm_out_dim * 4, lstm_out_dim),
+        )
+        
+        self.fc_out = torch.nn.Linear(lstm_out_dim, output_dim)
+        
     def forward(self, x):
-        h0 = torch.zeros(
-            self.lstm.num_layers * (2 if self.bidirectional else 1),
-            x.size(0),
-            self.lstm.hidden_size,
-            device=x.device
-        )
-        c0 = torch.zeros(
-            self.lstm.num_layers * (2 if self.bidirectional else 1),
-            x.size(0),
-            self.lstm.hidden_size,
-            device=x.device
-        )
-        out, _ = self.lstm(x, (h0, c0))
-        out = self.layer_norm(out)
-        out = self.dropout(out)
-        attn_weights = torch.softmax(self.attn(out).squeeze(-1), dim=1)
-        context = torch.sum(out * attn_weights.unsqueeze(-1), dim=1)
-        out = self.fc(context)
-        return out
+        # LSTM
+        lstm_out, _ = self.lstm(x)
+        
+        # Attention with residual connection
+        attn_out, _ = self.attention(lstm_out, lstm_out, lstm_out)
+        lstm_out = self.layer_norm1(lstm_out + attn_out)
+        
+        # Feed-forward with residual connection
+        ff_out = self.ff(lstm_out)
+        lstm_out = self.layer_norm2(lstm_out + ff_out)
+        
+        # Take last timestep and output
+        return self.fc_out(lstm_out[:, -1, :])
+
 
 # ------------------------------------------------------------------------
 # Set random seeds for reproducibility
@@ -118,13 +130,13 @@ np.random.seed(SEED)
 # Sequence/data loader helpers
 def create_sequences(X, y, seq_len=1):
     Xs, ys = [], []
-    # Predict the NEXT value after the sequence (no data leakage)
+    # Predict the NEXT value after the sequence 
     for i in range(len(X) - seq_len):
         Xs.append(X[i:i+seq_len])
         ys.append(y[i+seq_len])
     return np.array(Xs), np.array(ys)
 
-SEQ_LEN = 20
+SEQ_LEN = 60
 
 def get_sequence_loader(X, y, seq_len, batch_size):
     X_seq, y_seq = create_sequences(X, y, seq_len)
@@ -141,85 +153,84 @@ def get_sequence_loader(X, y, seq_len, batch_size):
 # Cross-validation on trainval set (time series split)
 tscv = TimeSeriesSplit(n_splits=5)
 
-# --- Optuna hyperparameter tuning on the last (most recent) fold only ---
-def last_fold_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv, device, seq_len, epochs):
+# --- Optuna hyperparameter tuning on the last (most recent) folds (now last 3 folds) ---
+def last_folds_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv, device, seq_len, epochs, n_folds=3):
     split_indices = list(tscv.split(X_trainval))
-    if not split_indices:
-        raise ValueError("No folds found in TimeSeriesSplit. Check your data and n_splits.")
-    train_idx, val_idx = split_indices[-1]
-    # Scale inside the fold (no leakage)
-    scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_trainval[train_idx])
-    X_val = scaler.transform(X_trainval[val_idx])
-    y_train = y_trainval[train_idx]
-    y_val = y_trainval[val_idx]
-    # Hyperparameters to tune 
-    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
-    num_layers = trial.suggest_int("num_layers", 1, 3)
-    dropout = trial.suggest_float("dropout", 0.2, 0.3)
-    lr = trial.suggest_loguniform("lr", 1e-4, 1e-2)
-    batch_size = trial.suggest_categorical("batch_size", [16, 32])
-    grad_clip = trial.suggest_float("grad_clip", 1.0, 2.0)
-    bidirectional = False
-    weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-3)
-    # Add weighted_mse parameter
-    weighted_mse = trial.suggest_categorical("weighted_mse", [True])
-    print(f"\nOptuna trial {trial.number}: hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout:.3f}, lr={lr:.5f}, batch_size={batch_size}, grad_clip={grad_clip:.2f}, weight_decay={weight_decay:.6f}, weighted_mse={weighted_mse}")
-    train_loader = get_sequence_loader(X_train, y_train, seq_len, batch_size)
-    val_loader = get_sequence_loader(X_val, y_val, seq_len, batch_size)
-    model = model_class(
-        input_dim=X_train.shape[1],
-        hidden_dim=hidden_dim,
-        num_layers=num_layers,
-        dropout=dropout,
-        bidirectional=bidirectional
-    ).to(device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=lr,
-        weight_decay=weight_decay
-    )
-    # Always use class-balance weighted MSE loss
-    weight_pos, weight_neg = calculate_class_weights(y_train)
-    # Reduce the extreme weighting by interpolating toward 1.0
-    alpha = 0.5
-    weight_pos = 1.0 + alpha * (weight_pos - 1.0)
-    weight_neg = 1.0 + alpha * (weight_neg - 1.0)
-    criterion = WeightedMSELoss(weight_pos=weight_pos, weight_neg=weight_neg)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.1)
-    orig_tqdm = tqdm
-    try:
-        globals()['tqdm'] = lambda *a, **k: (x for x in range(a[0])) if a else iter([])
-        model, _ = train_full_model(
-            model, train_loader, val_loader, optimizer, criterion, scheduler, device,
-            epochs=epochs, grad_clip=grad_clip, early_stopping_patience=5, save_path=None
+    folds_to_use = split_indices[-n_folds:]
+    fold_losses = []
+    for train_idx, val_idx in folds_to_use:
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X_trainval[train_idx])
+        X_val = scaler.transform(X_trainval[val_idx])
+        y_train = y_trainval[train_idx]
+        y_val = y_trainval[val_idx]
+        # Hyperparameters to tune (updated ranges)
+        hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
+        num_layers = trial.suggest_int("num_layers", 1, 3)
+        dropout = trial.suggest_float("dropout", 0.3, 0.5)  # FIX 1: Stronger regularization
+        lr = trial.suggest_loguniform("lr", 1e-4, 1e-2)
+        batch_size = trial.suggest_categorical("batch_size", [16, 32])
+        grad_clip = trial.suggest_float("grad_clip", 1.0, 2.0)
+        bidirectional = False
+        weight_decay = trial.suggest_loguniform("weight_decay", 1e-4, 1e-2)  # FIX 3: Wider range
+        # Print only for first fold in trial
+        if len(fold_losses) == 0:
+            print(f"\nOptuna trial {trial.number}: hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout:.3f}, lr={lr:.5f}, batch_size={batch_size}, grad_clip={grad_clip:.2f}, weight_decay={weight_decay:.6f}")
+        train_loader = get_sequence_loader(X_train, y_train, seq_len, batch_size)
+        val_loader = get_sequence_loader(X_val, y_val, seq_len, batch_size)
+        model = model_class(
+            input_dim=X_train.shape[1],
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout,
+            bidirectional=bidirectional
+        ).to(device)
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=lr,
+            weight_decay=weight_decay
         )
-    finally:
-        globals()['tqdm'] = orig_tqdm
-    val_loss, _, _ = validate_one_epoch(model, val_loader, criterion, device)
-    return val_loss
+        weight_pos, weight_neg = calculate_class_weights(y_train)
+        alpha = 0.5
+        weight_pos = 1.0 + alpha * (weight_pos - 1.0)
+        weight_neg = 1.0 + alpha * (weight_neg - 1.0)
+        criterion = WeightedMSELoss(weight_pos=weight_pos, weight_neg=weight_neg)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.1)
+        orig_tqdm = tqdm
+        try:
+            globals()['tqdm'] = lambda *a, **k: (x for x in range(a[0])) if a else iter([])
+            model, _ = train_full_model(
+                model, train_loader, val_loader, optimizer, criterion, scheduler, device,
+                epochs=epochs, grad_clip=grad_clip, early_stopping_patience=5, save_path=None
+            )
+        finally:
+            globals()['tqdm'] = orig_tqdm
+        val_loss, _, _ = validate_one_epoch(model, val_loader, criterion, device)
+        fold_losses.append(val_loss)
+    return np.mean(fold_losses)  # FIX 2: Average across last 3 folds
 
-def tune_hyperparameters_last_fold(model_class, X_trainval, y_trainval, tscv, device, seq_len=60, n_trials=30, epochs=80):
-    print(f"Running Optuna hyperparameter tuning on last fold ({n_trials} trials, {epochs} epochs per trial)...")
+def tune_hyperparameters_last_folds(model_class, X_trainval, y_trainval, tscv, device, seq_len=60, n_trials=30, epochs=80, n_folds=3):
+    print(f"Running Optuna hyperparameter tuning on last {n_folds} folds ({n_trials} trials, {epochs} epochs per trial)...")
     study = optuna.create_study(direction="minimize")
     def wrapped_objective(trial):
-        return last_fold_optuna_objective(
-            trial, model_class, X_trainval, y_trainval, tscv, device, seq_len, epochs
+        return last_folds_optuna_objective(
+            trial, model_class, X_trainval, y_trainval, tscv, device, seq_len, epochs, n_folds=n_folds
         )
     study.optimize(wrapped_objective, n_trials=n_trials, show_progress_bar=True)
     print("Best trial:", study.best_trial.params)
     return study.best_trial.params
 
-# --- Use Optuna to find best hyperparameters on last fold ---
-best_params = tune_hyperparameters_last_fold(
-    FinancialLSTM,
+# --- Use Optuna to find best hyperparameters on last 3 folds ---
+best_params = tune_hyperparameters_last_folds(
+    FinancialLSTMWithAttention,
     X_trainval.values,
     y_trainval.values,
     tscv,
     DEVICE,
     seq_len=SEQ_LEN,
     n_trials=30,
-    epochs=EPOCHS
+    epochs=EPOCHS,
+    n_folds=3
 )
 print("Best hyperparameters found by Optuna:", best_params)
 
@@ -239,7 +250,7 @@ model_params = {
     "bidirectional": False
 }
 cv_metrics = cross_val_with_metrics(
-    FinancialLSTM,
+    FinancialLSTMWithAttention,
     model_params,
     X_trainval.values,  # Pass raw data, not scaled
     y_trainval.values,
@@ -285,7 +296,7 @@ trainval_loader = get_sequence_loader(X_trainval_scaled, y_trainval.values, SEQ_
 models_dir = os.path.join(os.path.dirname(__file__), 'saved_models')
 os.makedirs(models_dir, exist_ok=True)
 
-model = FinancialLSTM(
+model = FinancialLSTMWithAttention(
     input_dim=X.shape[1],
     hidden_dim=best_params["hidden_dim"],
     num_layers=best_params["num_layers"],
@@ -297,7 +308,7 @@ optimizer = torch.optim.AdamW(
     lr=best_params["lr"],
     weight_decay=best_params.get("weight_decay", 1e-5)
 )
-# --- Change 3: Use WeightedMSELoss for final test training ---
+
 weight_pos, weight_neg = calculate_class_weights(y_trainval.values)
 # Reduce the extreme weighting by interpolating toward 1.0
 alpha = 0.5

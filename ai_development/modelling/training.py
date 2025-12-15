@@ -229,7 +229,8 @@ def objective(trial, model_class, X_train, y_train, X_val, y_val, device, seq_le
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=lr,
-        weight_decay=weight_decay
+        weight_decay=weight_decay,
+        amsgrad=True
     )
     criterion = torch.nn.MSELoss()
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.1)
