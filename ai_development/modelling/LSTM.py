@@ -22,7 +22,7 @@ warnings.filterwarnings("ignore")
 
 # ------------------------------------------------------------------------
 # Device configuration
-DEVICE,EPOCHS,  SEED = config()
+DEVICE,EPOCHS, SEED = config()
 
 # ------------------------------------------------------------------------
 # Load the final dataset
@@ -200,7 +200,7 @@ model_params = {
     "hidden_dim": best_params["hidden_dim"],
     "num_layers": best_params["num_layers"],
     "dropout": best_params["dropout"],
-    "bidirectional": best_params["bidirectional"]
+    "bidirectional": False  # Always unidirectional for time series
 }
 cv_metrics = cross_val_with_metrics(
     FinancialLSTM,
@@ -248,7 +248,7 @@ model = FinancialLSTM(
     hidden_dim=best_params["hidden_dim"],
     num_layers=best_params["num_layers"],
     dropout=best_params["dropout"],
-    bidirectional=best_params["bidirectional"]
+    bidirectional=False  # Always unidirectional for time series
 ).to(DEVICE)
 optimizer = torch.optim.AdamW(
     model.parameters(),
