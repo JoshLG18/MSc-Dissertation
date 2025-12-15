@@ -142,7 +142,7 @@ def last_fold_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv,
     grad_clip = trial.suggest_float("grad_clip", 1.0, 2.0)
     bidirectional = False
     weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-3)
-    dir_weight = trial.suggest_float("dir_weight", 0.001, 0.01) 
+    dir_weight = trial.suggest_float("dir_weight", 0.005, 0.05) 
     print(f"\nOptuna trial {trial.number}: hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout:.3f}, lr={lr:.5f}, batch_size={batch_size}, grad_clip={grad_clip:.2f}, weight_decay={weight_decay:.6f}, dir_weight={dir_weight:.2f}")
     train_loader = get_sequence_loader(X_train, y_train, seq_len, batch_size)
     val_loader = get_sequence_loader(X_val, y_val, seq_len, batch_size)
