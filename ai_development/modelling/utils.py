@@ -45,53 +45,43 @@ def print_data_summary(df):
     
 # -------------------------------------------------------------------------
 # # run the cross validation to get metrics for both models
+# get_cv_scores: ML models use MSE loss for CV, no directional loss
 def get_cv_scores(model_cls, model_params, X_trainval, y_trainval, tscv):
-   
-    mse, mae, dir_acc, prec, rec, f1 = [], [], [], [], [], [] # lists to store metrics for each fold
-    for train_idx, val_idx in tscv.split(X_trainval): # loop through the time series splits
-
-        X_tr, X_val = X_trainval.iloc[train_idx], X_trainval.iloc[val_idx] # get the train and validation sets
-        y_tr, y_val = y_trainval.iloc[train_idx], y_trainval.iloc[val_idx] # get the train and validation targets
-
-        scaler_cv = StandardScaler() # define a scaler for this fold
-        X_tr_scaled = scaler_cv.fit_transform(X_tr) # fit and transform the train set
-        X_val_scaled = scaler_cv.transform(X_val) # transform the validation set
-
-        params = model_params if model_params is not None else {} # get model parameters
-        model = model_cls(**params) # instantiate the model
-        model.fit(X_tr_scaled, y_tr) # fit the model
-        preds = model.predict(X_val_scaled) # make predictions
-
-        # calculate and store metrics
-        mse.append(mean_squared_error(y_val, preds)) # MSE
-        mae.append(mean_absolute_error(y_val, preds)) # MAE
-        d_pred, d_true = np.sign(preds), np.sign(y_val) # directional predictions and true values
-        dir_acc.append(np.mean(d_pred == d_true)) # directional accuracy
-        prec.append(precision_score(d_true, d_pred, labels=[-1, 1], average='macro', zero_division=0)) # precision
-        rec.append(recall_score(d_true, d_pred, labels=[-1, 1], average='macro', zero_division=0)) # recall
-        f1.append(f1_score(d_true, d_pred, labels=[-1, 1], average='macro', zero_division=0)) # F1 score
-    
-    def mean_ci(metric_list): # define a function to calculate mean and 95% CI
-        arr = np.array(metric_list) # convert to numpy array
-
-        mean = np.mean(arr) # calculate mean
-        std = np.std(arr, ddof=1) # sample standard deviation
-
-        n = len(arr) # get the number of samples
-        ci95 = 1.96 * std / np.sqrt(n) if n > 1 else 0 # 95% CI calculation
-        return float(mean), float(ci95) # return as floats
-
-    results = {} # dictionary to store results
-    for name, values in zip( # loop through metric names and their values
+    mse, mae, dir_acc, prec, rec, f1 = [], [], [], [], [], []
+    for train_idx, val_idx in tscv.split(X_trainval):
+        X_tr, X_val = X_trainval.iloc[train_idx], X_trainval.iloc[val_idx]
+        y_tr, y_val = y_trainval.iloc[train_idx], y_trainval.iloc[val_idx]
+        scaler_cv = StandardScaler()
+        X_tr_scaled = scaler_cv.fit_transform(X_tr)
+        X_val_scaled = scaler_cv.transform(X_val)
+        params = model_params if model_params is not None else {}
+        model = model_cls(**params)
+        model.fit(X_tr_scaled, y_tr)
+        preds = model.predict(X_val_scaled)
+        mse.append(mean_squared_error(y_val, preds))
+        mae.append(mean_absolute_error(y_val, preds))
+        d_pred, d_true = np.sign(preds), np.sign(y_val)
+        dir_acc.append(np.mean(d_pred == d_true))
+        prec.append(precision_score(d_true, d_pred, labels=[-1, 1], average='macro', zero_division=0))
+        rec.append(recall_score(d_true, d_pred, labels=[-1, 1], average='macro', zero_division=0))
+        f1.append(f1_score(d_true, d_pred, labels=[-1, 1], average='macro', zero_division=0))
+    def mean_ci(metric_list):
+        arr = np.array(metric_list)
+        mean = np.mean(arr)
+        std = np.std(arr, ddof=1)
+        n = len(arr)
+        ci95 = 1.96 * std / np.sqrt(n) if n > 1 else 0
+        return float(mean), float(ci95)
+    results = {}
+    for name, values in zip(
         ['mse', 'mae', 'dir_acc', 'precision', 'recall', 'f1'],
         [mse, mae, dir_acc, prec, rec, f1]
     ):
-        mean, ci = mean_ci(values) # calculate mean and CI
-        results[name] = values # store all fold values
-        results[name + "_mean"] = mean # store mean
-        results[name + "_ci95"] = ci # store 95% CI
-
-    return results # return the results dictionary
+        mean, ci = mean_ci(values)
+        results[name] = values
+        results[name + "_mean"] = mean
+        results[name + "_ci95"] = ci
+    return results
 # -------------------------------------------------------------------------
 # save CV metrics as JSON
 def save_cv_metrics_json(metrics_dict, out_path):

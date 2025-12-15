@@ -37,73 +37,57 @@ X_trainval_scaled = scaler.fit_transform(X_trainval)
 X_test_scaled = scaler.transform(X_test)
 
 # ------------------------------------------------------------------------
-# LSTM with Attention
+# LSTM with Attention (simplified, correct bidirectional logic)
 class FinancialLSTM(torch.nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers=2, output_dim=1, dropout=0.3, bidirectional=False):
+    def __init__(self, input_dim, hidden_dim=64, num_layers=1, output_dim=1, dropout=0.2, bidirectional=False):
         super().__init__()
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
         self.bidirectional = bidirectional
         self.lstm = torch.nn.LSTM(
             input_dim,
             hidden_dim,
             num_layers,
             batch_first=True,
-            dropout=dropout if num_layers > 1 else 0,
+            dropout=0 if num_layers == 1 else dropout,
             bidirectional=bidirectional
         )
         lstm_out_dim = hidden_dim * (2 if bidirectional else 1)
-        self.fc = torch.nn.Linear(lstm_out_dim, output_dim)
-        self.dropout = torch.nn.Dropout(dropout)
         self.layer_norm = torch.nn.LayerNorm(lstm_out_dim)
+        self.dropout = torch.nn.Dropout(dropout)
         self.attn = torch.nn.Linear(lstm_out_dim, 1)
-        # Weight initialization
-        for name, param in self.lstm.named_parameters():
-            if 'weight' in name:
-                torch.nn.init.orthogonal_(param)
-            elif 'bias' in name:
-                torch.nn.init.constant_(param, 0)
-        torch.nn.init.xavier_uniform_(self.fc.weight)
-        torch.nn.init.constant_(self.fc.bias, 0)
-        torch.nn.init.xavier_uniform_(self.attn.weight)
-        torch.nn.init.constant_(self.attn.bias, 0)
+        self.fc = torch.nn.Linear(lstm_out_dim, output_dim)
 
     def forward(self, x):
         h0 = torch.zeros(
-            self.num_layers * (2 if self.bidirectional else 1),
+            self.lstm.num_layers * (2 if self.bidirectional else 1),
             x.size(0),
-            self.hidden_dim,
+            self.lstm.hidden_size,
             device=x.device
         )
         c0 = torch.zeros(
-            self.num_layers * (2 if self.bidirectional else 1),
+            self.lstm.num_layers * (2 if self.bidirectional else 1),
             x.size(0),
-            self.hidden_dim,
+            self.lstm.hidden_size,
             device=x.device
         )
-        out, _ = self.lstm(x, (h0, c0))  # (batch, seq_len, lstm_out_dim)
+        out, _ = self.lstm(x, (h0, c0))
         out = self.layer_norm(out)
         out = self.dropout(out)
-        attn_weights = torch.softmax(self.attn(out).squeeze(-1), dim=1)  # (batch, seq_len)
-        context = torch.sum(out * attn_weights.unsqueeze(-1), dim=1)     # (batch, lstm_out_dim)
+        attn_weights = torch.softmax(self.attn(out).squeeze(-1), dim=1)
+        context = torch.sum(out * attn_weights.unsqueeze(-1), dim=1)
         out = self.fc(context)
         return out
 
-# ------------------------------------------------------------------------
-# Directional-aware loss function (must be defined before use)
+# Directional-aware loss function (for LSTM only)
 class DirectionalSmoothL1(torch.nn.Module):
-    def __init__(self, beta=0.1, dir_weight=3.0, neg_weight=1.0):
+    def __init__(self, beta=0.1, dir_weight=1.0):
         super().__init__()
         self.huber = torch.nn.SmoothL1Loss(beta=beta)
         self.dir_weight = dir_weight
-        self.neg_weight = neg_weight
 
     def forward(self, pred, target):
         base = self.huber(pred, target)
         sign_mismatch = (torch.sign(pred) != torch.sign(target)).float()
-        is_neg = (target < 0).float()
-        w = 1.0 + (self.neg_weight - 1.0) * is_neg
-        dir_penalty = (w * sign_mismatch * (pred - target).abs()).mean()
+        dir_penalty = (sign_mismatch * (pred - target).abs()).mean()
         return base + self.dir_weight * dir_penalty
 
 # ------------------------------------------------------------------------
@@ -114,9 +98,10 @@ np.random.seed(SEED)
 # Sequence/data loader helpers
 def create_sequences(X, y, seq_len=1):
     Xs, ys = [], []
-    for i in range(len(X) - seq_len + 1):
+    # Predict the NEXT value after the sequence (no data leakage)
+    for i in range(len(X) - seq_len):
         Xs.append(X[i:i+seq_len])
-        ys.append(y[i+seq_len-1])
+        ys.append(y[i+seq_len])
     return np.array(Xs), np.array(ys)
 
 SEQ_LEN = 60
@@ -137,25 +122,28 @@ def get_sequence_loader(X, y, seq_len, batch_size):
 tscv = TimeSeriesSplit(n_splits=5)
 
 # --- Optuna hyperparameter tuning on the last (most recent) fold only ---
-def last_fold_optuna_objective(trial, model_class, X_trainval_scaled, y_trainval, tscv, device, seq_len, epochs=20):
-    split_indices = list(tscv.split(X_trainval_scaled))
+def last_fold_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv, device, seq_len, epochs):
+    split_indices = list(tscv.split(X_trainval))
     if not split_indices:
         raise ValueError("No folds found in TimeSeriesSplit. Check your data and n_splits.")
     train_idx, val_idx = split_indices[-1]
-    X_train, X_val = X_trainval_scaled[train_idx], X_trainval_scaled[val_idx]
-    y_train, y_val = y_trainval[train_idx], y_trainval[val_idx]
-    # Hyperparameters to tune
-    hidden_dim = trial.suggest_categorical("hidden_dim", [128, 256, 512])
-    num_layers = trial.suggest_int("num_layers", 2, 4)
-    dropout = trial.suggest_float("dropout", 0.2, 0.4)
-    lr = trial.suggest_loguniform("lr", 1e-5, 1e-2)
-    batch_size = trial.suggest_categorical("batch_size", [16, 32, 64])
+    # Scale inside the fold (no leakage)
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_trainval[train_idx])
+    X_val = scaler.transform(X_trainval[val_idx])
+    y_train = y_trainval[train_idx]
+    y_val = y_trainval[val_idx]
+    # Hyperparameters to tune (reduced search space for simplicity)
+    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128])
+    num_layers = trial.suggest_int("num_layers", 1, 2)
+    dropout = trial.suggest_float("dropout", 0.1, 0.3)
+    lr = trial.suggest_loguniform("lr", 1e-4, 1e-2)
+    batch_size = trial.suggest_categorical("batch_size", [16, 32])
     grad_clip = trial.suggest_float("grad_clip", 1.0, 2.0)
     bidirectional = False
     weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-3)
-    dir_weight = trial.suggest_float("dir_weight", 1.0, 5.0)
-    neg_weight = trial.suggest_float("neg_weight", 1.0, 3.0)
-    print(f"\nOptuna trial {trial.number}: hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout:.3f}, lr={lr:.5f}, batch_size={batch_size}, grad_clip={grad_clip:.2f}, weight_decay={weight_decay:.6f}, dir_weight={dir_weight:.3f}, neg_weight={neg_weight:.3f}")
+    dir_weight = trial.suggest_float("dir_weight", 0.5, 1.0)
+    print(f"\nOptuna trial {trial.number}: hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout:.3f}, lr={lr:.5f}, batch_size={batch_size}, grad_clip={grad_clip:.2f}, weight_decay={weight_decay:.6f}, dir_weight={dir_weight:.2f}")
     train_loader = get_sequence_loader(X_train, y_train, seq_len, batch_size)
     val_loader = get_sequence_loader(X_val, y_val, seq_len, batch_size)
     model = model_class(
@@ -170,7 +158,7 @@ def last_fold_optuna_objective(trial, model_class, X_trainval_scaled, y_trainval
         lr=lr,
         weight_decay=weight_decay
     )
-    criterion = DirectionalSmoothL1(beta=0.1, dir_weight=dir_weight, neg_weight=neg_weight)
+    criterion = DirectionalSmoothL1(beta=0.1, dir_weight=dir_weight)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.1)
     orig_tqdm = tqdm
     try:
@@ -184,12 +172,12 @@ def last_fold_optuna_objective(trial, model_class, X_trainval_scaled, y_trainval
     val_loss, _, _ = validate_one_epoch(model, val_loader, criterion, device)
     return val_loss
 
-def tune_hyperparameters_last_fold(model_class, X_trainval_scaled, y_trainval, tscv, device, seq_len=60, n_trials=30, epochs=20):
+def tune_hyperparameters_last_fold(model_class, X_trainval, y_trainval, tscv, device, seq_len=60, n_trials=30, epochs=80):
     print(f"Running Optuna hyperparameter tuning on last fold ({n_trials} trials, {epochs} epochs per trial)...")
     study = optuna.create_study(direction="minimize")
     def wrapped_objective(trial):
         return last_fold_optuna_objective(
-            trial, model_class, X_trainval_scaled, y_trainval, tscv, device, seq_len, epochs
+            trial, model_class, X_trainval, y_trainval, tscv, device, seq_len, epochs
         )
     study.optimize(wrapped_objective, n_trials=n_trials, show_progress_bar=True)
     print("Best trial:", study.best_trial.params)
@@ -198,33 +186,29 @@ def tune_hyperparameters_last_fold(model_class, X_trainval_scaled, y_trainval, t
 # --- Use Optuna to find best hyperparameters on last fold ---
 best_params = tune_hyperparameters_last_fold(
     FinancialLSTM,
-    X_trainval_scaled,
+    X_trainval.values,
     y_trainval.values,
     tscv,
     DEVICE,
     seq_len=SEQ_LEN,
     n_trials=30,
-    epochs=80
+    epochs=EPOCHS
 )
 print("Best hyperparameters found by Optuna:", best_params)
 
-# --- Use best hyperparameters for cross-validation (with directional loss) ---
-criterion_cv = DirectionalSmoothL1(
-    beta=0.1,
-    dir_weight=best_params["dir_weight"],
-    neg_weight=best_params["neg_weight"]
-)
+# --- Use best hyperparameters for cross-validation (directional loss, no leakage) ---
+criterion_cv = DirectionalSmoothL1(beta=0.1, dir_weight=best_params["dir_weight"])
 model_params = {
     "input_dim": X.shape[1],
     "hidden_dim": best_params["hidden_dim"],
     "num_layers": best_params["num_layers"],
     "dropout": best_params["dropout"],
-    "bidirectional": False  # Always unidirectional for time series
+    "bidirectional": False
 }
 cv_metrics = cross_val_with_metrics(
     FinancialLSTM,
     model_params,
-    X_trainval_scaled,
+    X_trainval.values,  # Pass raw data, not scaled
     y_trainval.values,
     tscv,
     best_params["batch_size"],
@@ -257,6 +241,11 @@ save_cv_metrics_json(cv_metrics, os.path.join(cv_dir, "lstm_cv_metrics.json"))
 # ------------------------------------------------------------------------
 # Full out-of-sample test predictions
 
+# Scale trainval and test using only trainval statistics (no leakage)
+scaler = StandardScaler()
+X_trainval_scaled = scaler.fit_transform(X_trainval)
+X_test_scaled = scaler.transform(X_test)
+
 test_loader = get_sequence_loader(X_test_scaled, y_test.values, SEQ_LEN, best_params["batch_size"])
 trainval_loader = get_sequence_loader(X_trainval_scaled, y_trainval.values, SEQ_LEN, best_params["batch_size"])
 
@@ -268,18 +257,14 @@ model = FinancialLSTM(
     hidden_dim=best_params["hidden_dim"],
     num_layers=best_params["num_layers"],
     dropout=best_params["dropout"],
-    bidirectional=False  # Always unidirectional for time series
+    bidirectional=False
 ).to(DEVICE)
 optimizer = torch.optim.AdamW(
     model.parameters(),
     lr=best_params["lr"],
     weight_decay=best_params.get("weight_decay", 1e-5)
 )
-criterion = DirectionalSmoothL1(
-    beta=0.1,
-    dir_weight=best_params.get("dir_weight", 3.0),
-    neg_weight=best_params.get("neg_weight", 1.0)
-)
+criterion = DirectionalSmoothL1(beta=0.1, dir_weight=best_params.get("dir_weight", 1.0))
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, 'min', patience=3, factor=0.1
 )
@@ -313,17 +298,7 @@ torch.save(model.state_dict(), os.path.join(models_dir, "lstm_final.pt"))
 results = evaluate_model(model, test_loader, DEVICE)
 print("Out-of-sample test metrics:", results["test_metrics"])
 
-out_dir = os.path.join(os.path.dirname(__file__), '..', 'results_analysis', 'results', 'out_of_sample')
-os.makedirs(out_dir, exist_ok=True)
-save_test_predictions(
-    np.array([y for _, y in test_loader.dataset]),
-    results["predicted_returns"],
-    out_dir,
-    "lstm_test_predictions.csv"
-)
-
-# ------------------------------------------------------------------------
-# Threshold tuning for best directional accuracy
+# --- Threshold tuning for best directional accuracy ---
 def tune_directional_threshold(preds, targets):
     best_acc = 0
     best_th = 0
@@ -335,8 +310,41 @@ def tune_directional_threshold(preds, targets):
             best_th = th
     return best_th, best_acc
 
-best_th, best_acc = tune_directional_threshold(results["predicted_returns"], results["actual_returns"])
-print(f"Best directional threshold: {best_th:.5f} | Validation directional accuracy: {best_acc:.3f}")
+# Use validation set to tune threshold, then apply to test predictions
+if val_loader_final is not None:
+    _, val_preds, val_targets = validate_one_epoch(model, val_loader_final, criterion, DEVICE)
+    best_th, best_acc = tune_directional_threshold(val_preds, val_targets)
+    print(f"Best directional threshold (val): {best_th:.5f} | Validation directional accuracy: {best_acc:.3f}")
+    # Apply threshold to test predictions
+    test_preds = results["predicted_returns"]
+    test_targets = results["actual_returns"]
+    d_pred = np.where(test_preds > best_th, 1, -1)
+    d_true = np.sign(test_targets)
+    test_dir_acc = np.mean(d_pred == d_true)
+    print(f"Test directional accuracy (using tuned threshold): {test_dir_acc:.3f}")
 
+else:
+    print("No validation set for threshold tuning.")
+
+# Save test predictions, CV metrics, model weights, and tuned threshold (if applicable)
+out_dir = os.path.join(os.path.dirname(__file__), '..', 'results_analysis', 'results', 'out_of_sample')
+os.makedirs(out_dir, exist_ok=True)
+save_test_predictions(
+    np.array([y for _, y in test_loader.dataset]),
+    results["predicted_returns"],
+    out_dir,
+    "lstm_test_predictions.csv"
+)
+if val_loader_final is not None:
+    with open(os.path.join(out_dir, "lstm_tuned_threshold.txt"), "w") as f:
+        f.write(f"Tuned directional threshold: {best_th}\n")
+        f.write(f"Validation accuracy with threshold: {best_acc:.4f}\n")
+        f.write(f"Test accuracy with threshold: {test_dir_acc:.4f}\n")
+cv_dir = os.path.join(os.path.dirname(__file__), '..', 'results_analysis', 'results', 'cv_results')
+os.makedirs(cv_dir, exist_ok=True)
+save_cv_metrics_json(cv_metrics, os.path.join(cv_dir, "lstm_cv_metrics.json"))
+models_dir = os.path.join(os.path.dirname(__file__), 'saved_models')
+os.makedirs(models_dir, exist_ok=True)
+torch.save(model.state_dict(), os.path.join(models_dir, "lstm_final.pt"))
 # ------------------------------------------------------------------------
 # End of script

@@ -12,6 +12,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, p
 import json
 import os
 import pandas as pd
+from sklearn.preprocessing import StandardScaler
 
 # --------------------------------------------------------------------------
 def train_one_epoch(model, dataloader, optimizer, criterion, device, grad_clip=1.0):
@@ -141,14 +142,18 @@ def save_model(model, models_dir, filename):
     import joblib
     joblib.dump(model, os.path.join(models_dir, filename))
 
-def cross_val_with_metrics(model_class, model_params, X_trainval, y_trainval, tscv, batch_size, device, seq_len, epochs, grad_clip, early_stopping_patience, criterion=None):
+def cross_val_with_metrics(model_class, model_params, X, y, tscv, batch_size, device, seq_len, epochs, grad_clip, early_stopping_patience, criterion=None):
     mse, mae, dir_acc, prec, rec, f1 = [], [], [], [], [], []
-    fold_indices = list(tscv.split(X_trainval))
+    fold_indices = list(tscv.split(X))
     fold_weights = np.linspace(0.5, 1.0, len(fold_indices)) 
     fold_iter = tqdm(enumerate(fold_indices), total=len(fold_indices), desc="Cross-Validation Folds", dynamic_ncols=True)
     for i, (train_idx, val_idx) in fold_iter:
-        X_tr, X_val = X_trainval[train_idx], X_trainval[val_idx]
-        y_tr, y_val = y_trainval[train_idx], y_trainval[val_idx]
+        # Scale inside each fold (no leakage)
+        scaler = StandardScaler()
+        X_tr = scaler.fit_transform(X[train_idx])
+        X_val = scaler.transform(X[val_idx])
+        y_tr = y[train_idx]
+        y_val = y[val_idx]
         train_loader, val_loader = get_dataloaders(X_tr, y_tr, X_val, y_val, batch_size, device, seq_len=seq_len)
         model = model_class(**model_params).to(device)
         optimizer = torch.optim.AdamW(
@@ -156,9 +161,8 @@ def cross_val_with_metrics(model_class, model_params, X_trainval, y_trainval, ts
             lr=model_params.get("lr", 0.001),
             weight_decay=model_params.get("weight_decay", 1e-5)
         )
-        # Use custom criterion if provided
         if criterion is None:
-            criterion_ = torch.nn.SmoothL1Loss(beta=0.1)
+            criterion_ = torch.nn.MSELoss()
         else:
             criterion_ = criterion
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
