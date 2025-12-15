@@ -124,7 +124,7 @@ def create_sequences(X, y, seq_len=1):
         ys.append(y[i+seq_len])
     return np.array(Xs), np.array(ys)
 
-SEQ_LEN = 90
+SEQ_LEN = 20
 
 def get_sequence_loader(X, y, seq_len, batch_size):
     X_seq, y_seq = create_sequences(X, y, seq_len)
@@ -163,7 +163,7 @@ def last_fold_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv,
     bidirectional = False
     weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-3)
     # Add weighted_mse parameter
-    weighted_mse = trial.suggest_categorical("weighted_mse", [False, True])
+    weighted_mse = trial.suggest_categorical("weighted_mse", [True])
     print(f"\nOptuna trial {trial.number}: hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout:.3f}, lr={lr:.5f}, batch_size={batch_size}, grad_clip={grad_clip:.2f}, weight_decay={weight_decay:.6f}, weighted_mse={weighted_mse}")
     train_loader = get_sequence_loader(X_train, y_train, seq_len, batch_size)
     val_loader = get_sequence_loader(X_val, y_val, seq_len, batch_size)
