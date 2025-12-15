@@ -100,8 +100,8 @@ def evaluate_model(model, test_loader, device):
         for xb, yb in test_loader:
             xb, yb = xb.to(device), yb.to(device)
             out = model(xb)
-            preds.extend(out.squeeze().detach().cpu().numpy())
-            targets.extend(yb.detach().cpu().numpy())
+            preds.extend(out.squeeze().detach().cpu().numpy().reshape(-1).tolist())
+            targets.extend(yb.detach().cpu().numpy().reshape(-1).tolist())
     preds = np.array(preds)
     targets = np.array(targets)
     # Directional metrics

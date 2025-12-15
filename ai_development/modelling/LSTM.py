@@ -340,6 +340,7 @@ if val_loader_final is not None:
         f.write(f"Tuned directional threshold: {best_th}\n")
         f.write(f"Validation accuracy with threshold: {best_acc:.4f}\n")
         f.write(f"Test accuracy with threshold: {test_dir_acc:.4f}\n")
+        
 cv_dir = os.path.join(os.path.dirname(__file__), '..', 'results_analysis', 'results', 'cv_results')
 os.makedirs(cv_dir, exist_ok=True)
 save_cv_metrics_json(cv_metrics, os.path.join(cv_dir, "lstm_cv_metrics.json"))
