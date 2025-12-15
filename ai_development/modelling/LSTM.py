@@ -175,7 +175,7 @@ def last_fold_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv,
         lr=lr,
         weight_decay=weight_decay
     )
-    # --- Change 1: Use WeightedMSELoss ---
+    # Always use class-balance weighted MSE loss
     weight_pos, weight_neg = calculate_class_weights(y_train)
     criterion = WeightedMSELoss(weight_pos=weight_pos, weight_neg=weight_neg)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.1)
@@ -216,7 +216,7 @@ best_params = tune_hyperparameters_last_fold(
 print("Best hyperparameters found by Optuna:", best_params)
 
 # --- Use best hyperparameters for cross-validation ---
-# --- Change 2: Use WeightedMSELoss for CV ---
+# Always use class-balance weighted MSE loss for CV
 weight_pos, weight_neg = calculate_class_weights(y_trainval.values)
 criterion_cv = WeightedMSELoss(weight_pos=weight_pos, weight_neg=weight_neg)
 model_params = {
