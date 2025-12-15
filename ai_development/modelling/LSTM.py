@@ -104,7 +104,7 @@ def create_sequences(X, y, seq_len=1):
         ys.append(y[i+seq_len])
     return np.array(Xs), np.array(ys)
 
-SEQ_LEN = 60
+SEQ_LEN = 30
 
 def get_sequence_loader(X, y, seq_len, batch_size):
     X_seq, y_seq = create_sequences(X, y, seq_len)
