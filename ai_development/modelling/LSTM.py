@@ -182,7 +182,7 @@ def last_fold_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv,
     # Always use class-balance weighted MSE loss
     weight_pos, weight_neg = calculate_class_weights(y_train)
     # Reduce the extreme weighting by interpolating toward 1.0
-    alpha = 0.75
+    alpha = 0.5
     weight_pos = 1.0 + alpha * (weight_pos - 1.0)
     weight_neg = 1.0 + alpha * (weight_neg - 1.0)
     criterion = WeightedMSELoss(weight_pos=weight_pos, weight_neg=weight_neg)
