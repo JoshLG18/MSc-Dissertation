@@ -181,6 +181,13 @@ def cross_val_with_metrics(model_class, model_params, X, y, tscv, batch_size, de
         prec.append(precision_score(d_true, d_pred, labels=[-1, 1], average='macro', zero_division=0) * weight)
         rec.append(recall_score(d_true, d_pred, labels=[-1, 1], average='macro', zero_division=0) * weight)
         f1.append(f1_score(d_true, d_pred, labels=[-1, 1], average='macro', zero_division=0) * weight)
+    # --- Confidence intervals ---
+    def mean_ci(arr):
+        arr = np.array(arr)
+        mean = np.mean(arr)
+        std_err = np.std(arr, ddof=1) / np.sqrt(len(arr))
+        ci = 1.96 * std_err
+        return {"mean": mean, "ci95": ci, "lower": mean - ci, "upper": mean + ci}
     results = {
         "mse": mse,
         "mae": mae,
@@ -188,7 +195,13 @@ def cross_val_with_metrics(model_class, model_params, X, y, tscv, batch_size, de
         "precision": prec,
         "recall": rec,
         "f1": f1,
-        "fold_weights": fold_weights.tolist()
+        "fold_weights": fold_weights.tolist(),
+        "mse_ci": mean_ci(mse),
+        "mae_ci": mean_ci(mae),
+        "dir_acc_ci": mean_ci(dir_acc),
+        "precision_ci": mean_ci(prec),
+        "recall_ci": mean_ci(rec),
+        "f1_ci": mean_ci(f1)
     }
     return results
 
