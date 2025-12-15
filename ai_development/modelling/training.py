@@ -141,10 +141,12 @@ def save_model(model, models_dir, filename):
     import joblib
     joblib.dump(model, os.path.join(models_dir, filename))
 
-def cross_val_with_metrics(model_class, model_params, X_trainval, y_trainval, tscv, batch_size, device, seq_len, epochs, grad_clip, early_stopping_patience):
+def cross_val_with_metrics(model_class, model_params, X_trainval, y_trainval, tscv, batch_size, device, seq_len, epochs, grad_clip, early_stopping_patience, criterion=None):
     mse, mae, dir_acc, prec, rec, f1 = [], [], [], [], [], []
-    fold_iter = tqdm(list(tscv.split(X_trainval)), desc="Cross-Validation Folds", dynamic_ncols=True)
-    for train_idx, val_idx in fold_iter:
+    fold_indices = list(tscv.split(X_trainval))
+    fold_weights = np.linspace(0.5, 1.0, len(fold_indices)) 
+    fold_iter = tqdm(enumerate(fold_indices), total=len(fold_indices), desc="Cross-Validation Folds", dynamic_ncols=True)
+    for i, (train_idx, val_idx) in fold_iter:
         X_tr, X_val = X_trainval[train_idx], X_trainval[val_idx]
         y_tr, y_val = y_trainval[train_idx], y_trainval[val_idx]
         train_loader, val_loader = get_dataloaders(X_tr, y_tr, X_val, y_val, batch_size, device, seq_len=seq_len)
@@ -152,31 +154,37 @@ def cross_val_with_metrics(model_class, model_params, X_trainval, y_trainval, ts
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=model_params.get("lr", 0.001),
-            weight_decay=model_params.get("weight_decay", 1e-5)  # L2 regularization
+            weight_decay=model_params.get("weight_decay", 1e-5)
         )
-        criterion = torch.nn.SmoothL1Loss(beta=0.1)  # More robust loss for noisy data
+        # Use custom criterion if provided
+        if criterion is None:
+            criterion_ = torch.nn.SmoothL1Loss(beta=0.1)
+        else:
+            criterion_ = criterion
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, 'min', patience=3, factor=0.1  # More aggressive schedule
+            optimizer, 'min', patience=3, factor=0.1
         )
         model, _ = train_full_model(
-            model, train_loader, val_loader, optimizer, criterion, scheduler, device,
+            model, train_loader, val_loader, optimizer, criterion_, scheduler, device,
             epochs=epochs, grad_clip=grad_clip, early_stopping_patience=early_stopping_patience, save_path=None
         )
-        val_loss, val_preds, val_targets = validate_one_epoch(model, val_loader, criterion, device)
-        mse.append(mean_squared_error(val_targets, val_preds))
-        mae.append(mean_absolute_error(val_targets, val_preds))
+        val_loss, val_preds, val_targets = validate_one_epoch(model, val_loader, criterion_, device)
+        weight = fold_weights[i]
+        mse.append(mean_squared_error(val_targets, val_preds) * weight)
+        mae.append(mean_absolute_error(val_targets, val_preds) * weight)
         d_pred, d_true = np.sign(val_preds), np.sign(val_targets)
-        dir_acc.append(np.mean(d_pred == d_true))
-        prec.append(precision_score(d_true, d_pred, labels=[-1, 1], average='macro', zero_division=0))
-        rec.append(recall_score(d_true, d_pred, labels=[-1, 1], average='macro', zero_division=0))
-        f1.append(f1_score(d_true, d_pred, labels=[-1, 1], average='macro', zero_division=0))
+        dir_acc.append(np.mean(d_pred == d_true) * weight)
+        prec.append(precision_score(d_true, d_pred, labels=[-1, 1], average='macro', zero_division=0) * weight)
+        rec.append(recall_score(d_true, d_pred, labels=[-1, 1], average='macro', zero_division=0) * weight)
+        f1.append(f1_score(d_true, d_pred, labels=[-1, 1], average='macro', zero_division=0) * weight)
     results = {
         "mse": mse,
         "mae": mae,
         "dir_acc": dir_acc,
         "precision": prec,
         "recall": rec,
-        "f1": f1
+        "f1": f1,
+        "fold_weights": fold_weights.tolist()
     }
     return results
 

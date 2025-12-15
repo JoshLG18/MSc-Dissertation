@@ -22,7 +22,7 @@ warnings.filterwarnings("ignore")
 
 # ------------------------------------------------------------------------
 # Device configuration
-DEVICE,EPOCHS, SEED = config()
+DEVICE, EPOCHS, SEED = config()
 
 # ------------------------------------------------------------------------
 # Load the final dataset
@@ -89,6 +89,24 @@ class FinancialLSTM(torch.nn.Module):
         out = self.fc(context)
         return out
 
+# ------------------------------------------------------------------------
+# Directional-aware loss function (must be defined before use)
+class DirectionalSmoothL1(torch.nn.Module):
+    def __init__(self, beta=0.1, dir_weight=3.0, neg_weight=1.0):
+        super().__init__()
+        self.huber = torch.nn.SmoothL1Loss(beta=beta)
+        self.dir_weight = dir_weight
+        self.neg_weight = neg_weight
+
+    def forward(self, pred, target):
+        base = self.huber(pred, target)
+        sign_mismatch = (torch.sign(pred) != torch.sign(target)).float()
+        is_neg = (target < 0).float()
+        w = 1.0 + (self.neg_weight - 1.0) * is_neg
+        dir_penalty = (w * sign_mismatch * (pred - target).abs()).mean()
+        return base + self.dir_weight * dir_penalty
+
+# ------------------------------------------------------------------------
 # Set random seeds for reproducibility
 torch.manual_seed(SEED)
 np.random.seed(SEED)
@@ -119,7 +137,6 @@ def get_sequence_loader(X, y, seq_len, batch_size):
 tscv = TimeSeriesSplit(n_splits=5)
 
 # --- Optuna hyperparameter tuning on the last (most recent) fold only ---
-
 def last_fold_optuna_objective(trial, model_class, X_trainval_scaled, y_trainval, tscv, device, seq_len, epochs=20):
     split_indices = list(tscv.split(X_trainval_scaled))
     if not split_indices:
@@ -136,12 +153,11 @@ def last_fold_optuna_objective(trial, model_class, X_trainval_scaled, y_trainval
     grad_clip = trial.suggest_float("grad_clip", 1.0, 2.0)
     bidirectional = False
     weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-3)
-    # Print hyperparameters for this trial
-    print(f"\nOptuna trial {trial.number}: hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout:.3f}, lr={lr:.5f}, batch_size={batch_size}, grad_clip={grad_clip:.2f}, weight_decay={weight_decay:.6f}")
-    # Data loaders
+    dir_weight = trial.suggest_float("dir_weight", 1.0, 5.0)
+    neg_weight = trial.suggest_float("neg_weight", 1.0, 3.0)
+    print(f"\nOptuna trial {trial.number}: hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout:.3f}, lr={lr:.5f}, batch_size={batch_size}, grad_clip={grad_clip:.2f}, weight_decay={weight_decay:.6f}, dir_weight={dir_weight:.3f}, neg_weight={neg_weight:.3f}")
     train_loader = get_sequence_loader(X_train, y_train, seq_len, batch_size)
     val_loader = get_sequence_loader(X_val, y_val, seq_len, batch_size)
-    # Model
     model = model_class(
         input_dim=X_train.shape[1],
         hidden_dim=hidden_dim,
@@ -154,9 +170,8 @@ def last_fold_optuna_objective(trial, model_class, X_trainval_scaled, y_trainval
         lr=lr,
         weight_decay=weight_decay
     )
-    criterion = torch.nn.SmoothL1Loss(beta=0.1)
+    criterion = DirectionalSmoothL1(beta=0.1, dir_weight=dir_weight, neg_weight=neg_weight)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.1)
-    # Train model
     orig_tqdm = tqdm
     try:
         globals()['tqdm'] = lambda *a, **k: (x for x in range(a[0])) if a else iter([])
@@ -172,7 +187,6 @@ def last_fold_optuna_objective(trial, model_class, X_trainval_scaled, y_trainval
 def tune_hyperparameters_last_fold(model_class, X_trainval_scaled, y_trainval, tscv, device, seq_len=60, n_trials=30, epochs=20):
     print(f"Running Optuna hyperparameter tuning on last fold ({n_trials} trials, {epochs} epochs per trial)...")
     study = optuna.create_study(direction="minimize")
-    # Use Optuna's default progress bar 
     def wrapped_objective(trial):
         return last_fold_optuna_objective(
             trial, model_class, X_trainval_scaled, y_trainval, tscv, device, seq_len, epochs
@@ -194,7 +208,12 @@ best_params = tune_hyperparameters_last_fold(
 )
 print("Best hyperparameters found by Optuna:", best_params)
 
-# --- Use best hyperparameters for cross-validation ---
+# --- Use best hyperparameters for cross-validation (with directional loss) ---
+criterion_cv = DirectionalSmoothL1(
+    beta=0.1,
+    dir_weight=best_params["dir_weight"],
+    neg_weight=best_params["neg_weight"]
+)
 model_params = {
     "input_dim": X.shape[1],
     "hidden_dim": best_params["hidden_dim"],
@@ -213,7 +232,8 @@ cv_metrics = cross_val_with_metrics(
     SEQ_LEN,
     EPOCHS,
     grad_clip=best_params["grad_clip"],
-    early_stopping_patience=10
+    early_stopping_patience=10,
+    criterion=criterion_cv
 )
 
 print("CV MSEs:", cv_metrics["mse"])
@@ -255,13 +275,36 @@ optimizer = torch.optim.AdamW(
     lr=best_params["lr"],
     weight_decay=best_params.get("weight_decay", 1e-5)
 )
-criterion = torch.nn.SmoothL1Loss(beta=0.1)
+criterion = DirectionalSmoothL1(
+    beta=0.1,
+    dir_weight=best_params.get("dir_weight", 3.0),
+    neg_weight=best_params.get("neg_weight", 1.0)
+)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, 'min', patience=3, factor=0.1
 )
 
+# Early stopping on the test set: use a validation split from trainval for early stopping
+val_prop = 0.1
+X_tv_seq, y_tv_seq = create_sequences(X_trainval_scaled, y_trainval.values, SEQ_LEN)
+val_size = int(len(X_tv_seq) * val_prop)
+if val_size > 0:
+    X_val_seq, y_val_seq = X_tv_seq[-val_size:], y_tv_seq[-val_size:]
+    X_train_seq, y_train_seq = X_tv_seq[:-val_size], y_tv_seq[:-val_size]
+    train_loader_final = DataLoader(
+        TensorDataset(torch.tensor(X_train_seq, dtype=torch.float32), torch.tensor(y_train_seq, dtype=torch.float32)),
+        batch_size=best_params["batch_size"], shuffle=False
+    )
+    val_loader_final = DataLoader(
+        TensorDataset(torch.tensor(X_val_seq, dtype=torch.float32), torch.tensor(y_val_seq, dtype=torch.float32)),
+        batch_size=best_params["batch_size"], shuffle=False
+    )
+else:
+    train_loader_final = trainval_loader
+    val_loader_final = None
+
 model, history = train_full_model(
-    model, trainval_loader, None, optimizer, criterion, scheduler, DEVICE,
+    model, train_loader_final, val_loader_final, optimizer, criterion, scheduler, DEVICE,
     epochs=EPOCHS, grad_clip=best_params["grad_clip"], early_stopping_patience=10, save_path=os.path.join(models_dir, "lstm_final.pt")
 )
 
@@ -278,3 +321,22 @@ save_test_predictions(
     out_dir,
     "lstm_test_predictions.csv"
 )
+
+# ------------------------------------------------------------------------
+# Threshold tuning for best directional accuracy
+def tune_directional_threshold(preds, targets):
+    best_acc = 0
+    best_th = 0
+    for th in np.linspace(-0.01, 0.01, 41):
+        d_pred = np.where(preds > th, 1, -1)
+        acc = np.mean(d_pred == np.sign(targets))
+        if acc > best_acc:
+            best_acc = acc
+            best_th = th
+    return best_th, best_acc
+
+best_th, best_acc = tune_directional_threshold(results["predicted_returns"], results["actual_returns"])
+print(f"Best directional threshold: {best_th:.5f} | Validation directional accuracy: {best_acc:.3f}")
+
+# ------------------------------------------------------------------------
+# End of script
