@@ -63,7 +63,11 @@ print(f"\nClass distribution in trainval:")
 print(f"  Up days (positive): {n_pos} ({100*n_pos/len(y_trainval):.1f}%)")
 print(f"  Down days (negative): {n_neg} ({100*n_neg/len(y_trainval):.1f}%)")
 weight_pos, weight_neg = calculate_class_weights(y_trainval.values)
-print(f"  Loss weights: pos={weight_pos:.3f}, neg={weight_neg:.3f}")
+# Reduce the extreme weighting by interpolating toward 1.0
+alpha = 0.5  # Blend factor (0=no weight, 1=full weight)
+weight_pos = 1.0 + alpha * (weight_pos - 1.0)
+weight_neg = 1.0 + alpha * (weight_neg - 1.0)
+print(f"  Loss weights (blended): pos={weight_pos:.3f}, neg={weight_neg:.3f}")
 
 # ------------------------------------------------------------------------
 # LSTM with Attention (simplified, correct bidirectional logic)
@@ -177,6 +181,10 @@ def last_fold_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv,
     )
     # Always use class-balance weighted MSE loss
     weight_pos, weight_neg = calculate_class_weights(y_train)
+    # Reduce the extreme weighting by interpolating toward 1.0
+    alpha = 0.5
+    weight_pos = 1.0 + alpha * (weight_pos - 1.0)
+    weight_neg = 1.0 + alpha * (weight_neg - 1.0)
     criterion = WeightedMSELoss(weight_pos=weight_pos, weight_neg=weight_neg)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.1)
     orig_tqdm = tqdm
@@ -218,6 +226,10 @@ print("Best hyperparameters found by Optuna:", best_params)
 # --- Use best hyperparameters for cross-validation ---
 # Always use class-balance weighted MSE loss for CV
 weight_pos, weight_neg = calculate_class_weights(y_trainval.values)
+# Reduce the extreme weighting by interpolating toward 1.0
+alpha = 0.5
+weight_pos = 1.0 + alpha * (weight_pos - 1.0)
+weight_neg = 1.0 + alpha * (weight_neg - 1.0)
 criterion_cv = WeightedMSELoss(weight_pos=weight_pos, weight_neg=weight_neg)
 model_params = {
     "input_dim": X.shape[1],
@@ -287,6 +299,10 @@ optimizer = torch.optim.AdamW(
 )
 # --- Change 3: Use WeightedMSELoss for final test training ---
 weight_pos, weight_neg = calculate_class_weights(y_trainval.values)
+# Reduce the extreme weighting by interpolating toward 1.0
+alpha = 0.5
+weight_pos = 1.0 + alpha * (weight_pos - 1.0)
+weight_neg = 1.0 + alpha * (weight_neg - 1.0)
 criterion = WeightedMSELoss(weight_pos=weight_pos, weight_neg=weight_neg)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, 'min', patience=3, factor=0.1
