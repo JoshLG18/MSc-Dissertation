@@ -231,7 +231,7 @@ def objective(trial, model_class, X_train, y_train, X_val, y_val, device, seq_le
         lr=lr,
         weight_decay=weight_decay
     )
-    criterion = torch.nn.SmoothL1Loss(beta=0.1)
+    criterion = torch.nn.MSELoss()
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.1)
     best_val_loss = float('inf')
     patience_counter = 0

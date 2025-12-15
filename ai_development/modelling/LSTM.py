@@ -77,19 +77,6 @@ class FinancialLSTM(torch.nn.Module):
         out = self.fc(context)
         return out
 
-# Directional-aware loss function (for LSTM only)
-class DirectionalSmoothL1(torch.nn.Module):
-    def __init__(self, beta=0.1, dir_weight=1.0):
-        super().__init__()
-        self.huber = torch.nn.SmoothL1Loss(beta=beta)
-        self.dir_weight = dir_weight
-
-    def forward(self, pred, target):
-        base = self.huber(pred, target)
-        sign_mismatch = (torch.sign(pred) != torch.sign(target)).float()
-        dir_penalty = (sign_mismatch * (pred - target).abs()).mean()
-        return base + self.dir_weight * dir_penalty
-
 # ------------------------------------------------------------------------
 # Set random seeds for reproducibility
 torch.manual_seed(SEED)
@@ -104,7 +91,7 @@ def create_sequences(X, y, seq_len=1):
         ys.append(y[i+seq_len])
     return np.array(Xs), np.array(ys)
 
-SEQ_LEN = 30
+SEQ_LEN = 60
 
 def get_sequence_loader(X, y, seq_len, batch_size):
     X_seq, y_seq = create_sequences(X, y, seq_len)
@@ -142,8 +129,7 @@ def last_fold_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv,
     grad_clip = trial.suggest_float("grad_clip", 1.0, 2.0)
     bidirectional = False
     weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-3)
-    dir_weight = trial.suggest_float("dir_weight", 0.005, 0.05) 
-    print(f"\nOptuna trial {trial.number}: hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout:.3f}, lr={lr:.5f}, batch_size={batch_size}, grad_clip={grad_clip:.2f}, weight_decay={weight_decay:.6f}, dir_weight={dir_weight:.2f}")
+    print(f"\nOptuna trial {trial.number}: hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout:.3f}, lr={lr:.5f}, batch_size={batch_size}, grad_clip={grad_clip:.2f}, weight_decay={weight_decay:.6f}")
     train_loader = get_sequence_loader(X_train, y_train, seq_len, batch_size)
     val_loader = get_sequence_loader(X_val, y_val, seq_len, batch_size)
     model = model_class(
@@ -158,7 +144,7 @@ def last_fold_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv,
         lr=lr,
         weight_decay=weight_decay
     )
-    criterion = DirectionalSmoothL1(beta=0.1, dir_weight=dir_weight)
+    criterion = torch.nn.MSELoss()
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.1)
     orig_tqdm = tqdm
     try:
@@ -196,8 +182,8 @@ best_params = tune_hyperparameters_last_fold(
 )
 print("Best hyperparameters found by Optuna:", best_params)
 
-# --- Use best hyperparameters for cross-validation (directional loss, no leakage) ---
-criterion_cv = DirectionalSmoothL1(beta=0.1, dir_weight=best_params["dir_weight"])
+# --- Use best hyperparameters for cross-validation ---
+criterion_cv = torch.nn.MSELoss()
 model_params = {
     "input_dim": X.shape[1],
     "hidden_dim": best_params["hidden_dim"],
@@ -264,7 +250,7 @@ optimizer = torch.optim.AdamW(
     lr=best_params["lr"],
     weight_decay=best_params.get("weight_decay", 1e-5)
 )
-criterion = DirectionalSmoothL1(beta=0.1, dir_weight=best_params.get("dir_weight", 1.0))
+criterion = torch.nn.MSELoss()
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, 'min', patience=3, factor=0.1
 )
