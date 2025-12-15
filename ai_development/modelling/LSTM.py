@@ -31,10 +31,39 @@ test_size = int(0.2 * len(X))
 X_trainval, X_test = X.iloc[:-test_size], X.iloc[-test_size:]
 y_trainval, y_test = y.iloc[:-test_size], y.iloc[-test_size:]
 
-# Scale features
-scaler = StandardScaler()
-X_trainval_scaled = scaler.fit_transform(X_trainval)
-X_test_scaled = scaler.transform(X_test)
+# --- Add class weight calculation utility ---
+def calculate_class_weights(y):
+    y = np.asarray(y)
+    pos = (y > 0)
+    neg = (y <= 0)
+    n_pos = np.sum(pos)
+    n_neg = np.sum(neg)
+    total = n_pos + n_neg
+    weight_pos = total / (2 * n_pos) if n_pos > 0 else 0.
+    weight_neg = total / (2 * n_neg) if n_neg > 0 else 0.
+    return float(weight_pos), float(weight_neg)
+
+class WeightedMSELoss(torch.nn.Module):
+    def __init__(self, weight_pos=1.0, weight_neg=1.0):
+        super().__init__()
+        self.weight_pos = weight_pos
+        self.weight_neg = weight_neg
+
+    def forward(self, input, target):
+        direction = torch.sign(target)
+        pos = (direction > 0).float()
+        neg = (direction <= 0).float()
+        weights = self.weight_pos * pos + self.weight_neg * neg
+        return torch.mean(weights * (input - target) ** 2)
+
+# --- Check class distribution (quick test) ---
+n_pos = (y_trainval > 0).sum()
+n_neg = (y_trainval <= 0).sum()
+print(f"\nClass distribution in trainval:")
+print(f"  Up days (positive): {n_pos} ({100*n_pos/len(y_trainval):.1f}%)")
+print(f"  Down days (negative): {n_neg} ({100*n_neg/len(y_trainval):.1f}%)")
+weight_pos, weight_neg = calculate_class_weights(y_trainval.values)
+print(f"  Loss weights: pos={weight_pos:.3f}, neg={weight_neg:.3f}")
 
 # ------------------------------------------------------------------------
 # LSTM with Attention (simplified, correct bidirectional logic)
@@ -129,7 +158,9 @@ def last_fold_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv,
     grad_clip = trial.suggest_float("grad_clip", 1.0, 2.0)
     bidirectional = False
     weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-3)
-    print(f"\nOptuna trial {trial.number}: hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout:.3f}, lr={lr:.5f}, batch_size={batch_size}, grad_clip={grad_clip:.2f}, weight_decay={weight_decay:.6f}")
+    # Add weighted_mse parameter
+    weighted_mse = trial.suggest_categorical("weighted_mse", [False, True])
+    print(f"\nOptuna trial {trial.number}: hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout:.3f}, lr={lr:.5f}, batch_size={batch_size}, grad_clip={grad_clip:.2f}, weight_decay={weight_decay:.6f}, weighted_mse={weighted_mse}")
     train_loader = get_sequence_loader(X_train, y_train, seq_len, batch_size)
     val_loader = get_sequence_loader(X_val, y_val, seq_len, batch_size)
     model = model_class(
@@ -144,7 +175,9 @@ def last_fold_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv,
         lr=lr,
         weight_decay=weight_decay
     )
-    criterion = torch.nn.MSELoss()
+    # --- Change 1: Use WeightedMSELoss ---
+    weight_pos, weight_neg = calculate_class_weights(y_train)
+    criterion = WeightedMSELoss(weight_pos=weight_pos, weight_neg=weight_neg)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.1)
     orig_tqdm = tqdm
     try:
@@ -183,7 +216,9 @@ best_params = tune_hyperparameters_last_fold(
 print("Best hyperparameters found by Optuna:", best_params)
 
 # --- Use best hyperparameters for cross-validation ---
-criterion_cv = torch.nn.MSELoss()
+# --- Change 2: Use WeightedMSELoss for CV ---
+weight_pos, weight_neg = calculate_class_weights(y_trainval.values)
+criterion_cv = WeightedMSELoss(weight_pos=weight_pos, weight_neg=weight_neg)
 model_params = {
     "input_dim": X.shape[1],
     "hidden_dim": best_params["hidden_dim"],
@@ -250,7 +285,9 @@ optimizer = torch.optim.AdamW(
     lr=best_params["lr"],
     weight_decay=best_params.get("weight_decay", 1e-5)
 )
-criterion = torch.nn.MSELoss()
+# --- Change 3: Use WeightedMSELoss for final test training ---
+weight_pos, weight_neg = calculate_class_weights(y_trainval.values)
+criterion = WeightedMSELoss(weight_pos=weight_pos, weight_neg=weight_neg)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, 'min', patience=3, factor=0.1
 )
