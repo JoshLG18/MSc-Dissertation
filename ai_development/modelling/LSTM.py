@@ -167,23 +167,22 @@ def last_folds_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv
         # Hyperparameters to tune (updated ranges)
         hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
         num_layers = trial.suggest_int("num_layers", 1, 3)
-        dropout = trial.suggest_float("dropout", 0.3, 0.5)  # FIX 1: Stronger regularization
+        dropout = trial.suggest_float("dropout", 0.3, 0.5)
         lr = trial.suggest_loguniform("lr", 1e-4, 1e-2)
         batch_size = trial.suggest_categorical("batch_size", [16, 32])
         grad_clip = trial.suggest_float("grad_clip", 1.0, 2.0)
-        bidirectional = False
-        weight_decay = trial.suggest_loguniform("weight_decay", 1e-4, 1e-2)  # FIX 3: Wider range
+        weight_decay = trial.suggest_loguniform("weight_decay", 1e-4, 1e-2)
         # Print only for first fold in trial
         if len(fold_losses) == 0:
             print(f"\nOptuna trial {trial.number}: hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout:.3f}, lr={lr:.5f}, batch_size={batch_size}, grad_clip={grad_clip:.2f}, weight_decay={weight_decay:.6f}")
         train_loader = get_sequence_loader(X_train, y_train, seq_len, batch_size)
         val_loader = get_sequence_loader(X_val, y_val, seq_len, batch_size)
+        # --- FIX: Remove bidirectional argument for FinancialLSTMWithAttention ---
         model = model_class(
             input_dim=X_train.shape[1],
             hidden_dim=hidden_dim,
             num_layers=num_layers,
-            dropout=dropout,
-            bidirectional=bidirectional
+            dropout=dropout
         ).to(device)
         optimizer = torch.optim.AdamW(
             model.parameters(),
@@ -207,7 +206,7 @@ def last_folds_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv
             globals()['tqdm'] = orig_tqdm
         val_loss, _, _ = validate_one_epoch(model, val_loader, criterion, device)
         fold_losses.append(val_loss)
-    return np.mean(fold_losses)  # FIX 2: Average across last 3 folds
+    return np.mean(fold_losses)
 
 def tune_hyperparameters_last_folds(model_class, X_trainval, y_trainval, tscv, device, seq_len=60, n_trials=30, epochs=80, n_folds=3):
     print(f"Running Optuna hyperparameter tuning on last {n_folds} folds ({n_trials} trials, {epochs} epochs per trial)...")
@@ -235,9 +234,7 @@ best_params = tune_hyperparameters_last_folds(
 print("Best hyperparameters found by Optuna:", best_params)
 
 # --- Use best hyperparameters for cross-validation ---
-# Always use class-balance weighted MSE loss for CV
 weight_pos, weight_neg = calculate_class_weights(y_trainval.values)
-# Reduce the extreme weighting by interpolating toward 1.0
 alpha = 0.5
 weight_pos = 1.0 + alpha * (weight_pos - 1.0)
 weight_neg = 1.0 + alpha * (weight_neg - 1.0)
@@ -246,8 +243,7 @@ model_params = {
     "input_dim": X.shape[1],
     "hidden_dim": best_params["hidden_dim"],
     "num_layers": best_params["num_layers"],
-    "dropout": best_params["dropout"],
-    "bidirectional": False
+    "dropout": best_params["dropout"]
 }
 cv_metrics = cross_val_with_metrics(
     FinancialLSTMWithAttention,
@@ -300,8 +296,7 @@ model = FinancialLSTMWithAttention(
     input_dim=X.shape[1],
     hidden_dim=best_params["hidden_dim"],
     num_layers=best_params["num_layers"],
-    dropout=best_params["dropout"],
-    bidirectional=False
+    dropout=best_params["dropout"]
 ).to(DEVICE)
 optimizer = torch.optim.AdamW(
     model.parameters(),
