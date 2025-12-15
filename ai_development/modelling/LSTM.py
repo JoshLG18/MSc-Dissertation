@@ -133,16 +133,16 @@ def last_fold_optuna_objective(trial, model_class, X_trainval, y_trainval, tscv,
     X_val = scaler.transform(X_trainval[val_idx])
     y_train = y_trainval[train_idx]
     y_val = y_trainval[val_idx]
-    # Hyperparameters to tune (reduced search space for simplicity)
-    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128])
-    num_layers = trial.suggest_int("num_layers", 1, 2)
-    dropout = trial.suggest_float("dropout", 0.1, 0.3)
+    # Hyperparameters to tune 
+    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
+    num_layers = trial.suggest_int("num_layers", 1, 3)
+    dropout = trial.suggest_float("dropout", 0.2, 0.3)
     lr = trial.suggest_loguniform("lr", 1e-4, 1e-2)
     batch_size = trial.suggest_categorical("batch_size", [16, 32])
     grad_clip = trial.suggest_float("grad_clip", 1.0, 2.0)
     bidirectional = False
     weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-3)
-    dir_weight = trial.suggest_float("dir_weight", 0.5, 1.0)
+    dir_weight = trial.suggest_float("dir_weight", 0.01, 0.1) 
     print(f"\nOptuna trial {trial.number}: hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout:.3f}, lr={lr:.5f}, batch_size={batch_size}, grad_clip={grad_clip:.2f}, weight_decay={weight_decay:.6f}, dir_weight={dir_weight:.2f}")
     train_loader = get_sequence_loader(X_train, y_train, seq_len, batch_size)
     val_loader = get_sequence_loader(X_val, y_val, seq_len, batch_size)
@@ -298,35 +298,7 @@ torch.save(model.state_dict(), os.path.join(models_dir, "lstm_final.pt"))
 results = evaluate_model(model, test_loader, DEVICE)
 print("Out-of-sample test metrics:", results["test_metrics"])
 
-# --- Threshold tuning for best directional accuracy ---
-def tune_directional_threshold(preds, targets):
-    best_acc = 0
-    best_th = 0
-    for th in np.linspace(-0.01, 0.01, 41):
-        d_pred = np.where(preds > th, 1, -1)
-        acc = np.mean(d_pred == np.sign(targets))
-        if acc > best_acc:
-            best_acc = acc
-            best_th = th
-    return best_th, best_acc
-
-# Use validation set to tune threshold, then apply to test predictions
-if val_loader_final is not None:
-    _, val_preds, val_targets = validate_one_epoch(model, val_loader_final, criterion, DEVICE)
-    best_th, best_acc = tune_directional_threshold(val_preds, val_targets)
-    print(f"Best directional threshold (val): {best_th:.5f} | Validation directional accuracy: {best_acc:.3f}")
-    # Apply threshold to test predictions
-    test_preds = results["predicted_returns"]
-    test_targets = results["actual_returns"]
-    d_pred = np.where(test_preds > best_th, 1, -1)
-    d_true = np.sign(test_targets)
-    test_dir_acc = np.mean(d_pred == d_true)
-    print(f"Test directional accuracy (using tuned threshold): {test_dir_acc:.3f}")
-
-else:
-    print("No validation set for threshold tuning.")
-
-# Save test predictions, CV metrics, model weights, and tuned threshold (if applicable)
+# Save test predictions, CV metrics, and model weights
 out_dir = os.path.join(os.path.dirname(__file__), '..', 'results_analysis', 'results', 'out_of_sample')
 os.makedirs(out_dir, exist_ok=True)
 save_test_predictions(
@@ -335,11 +307,6 @@ save_test_predictions(
     out_dir,
     "lstm_test_predictions.csv"
 )
-if val_loader_final is not None:
-    with open(os.path.join(out_dir, "lstm_tuned_threshold.txt"), "w") as f:
-        f.write(f"Tuned directional threshold: {best_th}\n")
-        f.write(f"Validation accuracy with threshold: {best_acc:.4f}\n")
-        f.write(f"Test accuracy with threshold: {test_dir_acc:.4f}\n")
         
 cv_dir = os.path.join(os.path.dirname(__file__), '..', 'results_analysis', 'results', 'cv_results')
 os.makedirs(cv_dir, exist_ok=True)
